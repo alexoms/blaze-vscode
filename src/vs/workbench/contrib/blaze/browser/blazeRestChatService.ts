@@ -58,7 +58,7 @@ export class BlazeRestChatService extends Disposable {
 			// Prepare the payload for the REST API
 			// Customize the system prompt based on the message content
 			//let systemPrompt = 'You are a helpful AI assistant that specializes in generating clean, efficient code. Focus on providing practical solutions with minimal explanation unless asked.';
-			let systemPrompt = `You are Cascade, a powerful agentic AI coding assistant designed by the Codeium engineering team: a world-class AI company based in Silicon Valley, California.
+			const systemPrompt = `You are Blaze, a powerful agentic AI coding assistant designed by the Blaze engineering team: a world-class AI company based in Silicon Valley, California.
 Exclusively available in Windsurf, the world's first agentic IDE, you operate on the revolutionary AI Flow paradigm, enabling you to work both independently and collaboratively with a USER.
 You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.
 The USER will send you requests, which you must always prioritize addressing. Along with each USER request, we will attach additional metadata about their current state, such as what files they have open and where their cursor is.
@@ -179,9 +179,9 @@ It is crucial to proceed step-by-step, waiting for the user's message after each
 
 By waiting for and carefully considering the user's response after each tool use, you can react accordingly and make informed decisions about how to proceed with the task. This iterative process helps ensure the overall success and accuracy of your work.`;
 			// Check if the message is specifically asking for Python code
-			if (message.toLowerCase().includes('python') || message.toLowerCase().includes('pandas')) {
-				systemPrompt = 'You help write reusable code in Python. Focus on clean, efficient implementations using best practices. Only output the code itself unless explanations are requested.';
-			}
+			//if (message.toLowerCase().includes('python') || message.toLowerCase().includes('pandas')) {
+			//	systemPrompt = 'You help write reusable code in Python. Focus on clean, efficient implementations using best practices. Only output the code itself unless explanations are requested.';
+			//}
 
 			const payload = {
 				prompt: message,
