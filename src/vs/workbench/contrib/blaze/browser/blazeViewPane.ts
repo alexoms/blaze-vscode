@@ -142,29 +142,29 @@ export class BlazeViewPane extends ViewPane {
 		container.style.width = '100%';
 		container.style.display = 'flex';
 		container.style.flexDirection = 'column';
-		container.style.backgroundColor = '#2d2d2d';
+		container.style.backgroundColor = '#0f2942'; // Darker blue background to match header
 		container.style.overflow = 'hidden';
 		parent.appendChild(container);
 
-		// Add a header with bright styling
+		// Add a header with dark blue styling
 		const header = document.createElement('div');
 		header.className = 'blaze-header';
 		header.style.padding = '10px';
-		header.style.backgroundColor = '#ff5722';
+		header.style.backgroundColor = '#1a365d'; // Dark blue color
 		header.style.color = 'white';
 		header.style.fontWeight = 'bold';
 		header.style.fontSize = '18px';
 		header.style.textAlign = 'center';
-		header.style.borderBottom = '2px solid #ff8a50';
-		header.textContent = 'BLAZE CHAT';
+		header.style.borderBottom = '2px solid #4299e1'; // Lighter blue border
+		header.textContent = 'BLAZE';
 		container.appendChild(header);
 
-		// Create a messages container with clear styling
+		// Create a messages container with dark blue styling
 		const messagesContainer = document.createElement('div');
 		messagesContainer.className = 'blaze-messages-container';
 		messagesContainer.setAttribute('data-blaze-messages', 'true');
 		messagesContainer.style.flex = '1';
-		messagesContainer.style.backgroundColor = '#333';
+		messagesContainer.style.backgroundColor = '#1e3a5f'; // Slightly lighter than the header
 		messagesContainer.style.padding = '15px';
 		messagesContainer.style.display = 'flex';
 		messagesContainer.style.flexDirection = 'column';
@@ -172,7 +172,7 @@ export class BlazeViewPane extends ViewPane {
 		messagesContainer.style.overflow = 'auto';
 		messagesContainer.style.margin = '10px';
 		messagesContainer.style.borderRadius = '5px';
-		messagesContainer.style.border = '2px solid #ff5722';
+		messagesContainer.style.border = '2px solid #4299e1'; // Matching blue border
 		container.appendChild(messagesContainer);
 
 		// Add a welcome message
@@ -180,27 +180,27 @@ export class BlazeViewPane extends ViewPane {
 		welcomeMessage.className = 'blaze-message';
 		welcomeMessage.textContent =
 			'Welcome to Blaze Chat! Type your message below.';
-		welcomeMessage.style.backgroundColor = '#444';
+		welcomeMessage.style.backgroundColor = '#2c4a7c'; // Slightly darker blue for contrast
 		welcomeMessage.style.padding = '10px';
 		welcomeMessage.style.borderRadius = '5px';
 		welcomeMessage.style.fontWeight = 'bold';
 		welcomeMessage.style.color = 'white';
-		welcomeMessage.style.borderLeft = '3px solid #ff5722';
+		welcomeMessage.style.borderLeft = '3px solid #63b3ed'; // Light blue accent
 		messagesContainer.appendChild(welcomeMessage);
 
-		// Create an input container with clear styling
+		// Create an input container with dark blue styling
 		const inputContainer = document.createElement('div');
 		inputContainer.className = 'blaze-input-container';
 		inputContainer.style.display = 'flex';
 		inputContainer.style.gap = '10px';
 		inputContainer.style.padding = '10px';
-		inputContainer.style.backgroundColor = '#333';
+		inputContainer.style.backgroundColor = '#1e3a5f'; // Matching the messages container
 		inputContainer.style.margin = '10px';
 		inputContainer.style.borderRadius = '5px';
-		inputContainer.style.border = '2px solid #ff5722';
+		inputContainer.style.border = '2px solid #63b3ed';
 		container.appendChild(inputContainer);
 
-		// Add an input field with high visibility
+		// Add an input field with dark blue styling
 		const inputField = document.createElement('input');
 		inputField.className = 'blaze-input-field';
 		inputField.type = 'text';
@@ -208,20 +208,20 @@ export class BlazeViewPane extends ViewPane {
 		inputField.style.flex = '1';
 		inputField.style.padding = '10px';
 		inputField.style.borderRadius = '5px';
-		inputField.style.border = '1px solid #ff5722';
-		inputField.style.backgroundColor = '#444';
+		inputField.style.border = '1px solid #4299e1'; // Matching blue border
+		inputField.style.backgroundColor = '#2c4a7c'; // Slightly darker blue for contrast
 		inputField.style.color = 'white';
 		inputField.style.fontSize = '14px';
 		inputContainer.appendChild(inputField);
 
-		// Add a send button with high visibility
+		// Add a send button with dark blue styling
 		const sendButton = document.createElement('button');
 		sendButton.className = 'blaze-send-button';
 		sendButton.textContent = 'SEND';
 		sendButton.style.padding = '10px 20px';
-		sendButton.style.backgroundColor = '#ff5722';
+		sendButton.style.backgroundColor = '#3182ce'; // Bright blue button
 		sendButton.style.color = 'white';
-		sendButton.style.border = 'none';
+		sendButton.style.border = '1px solid #4299e1';
 		sendButton.style.borderRadius = '5px';
 		sendButton.style.fontWeight = 'bold';
 		sendButton.style.cursor = 'pointer';
@@ -251,23 +251,27 @@ export class BlazeViewPane extends ViewPane {
 		modelContainer.style.alignItems = 'center';
 		modelContainer.style.justifyContent = 'space-between';
 		modelContainer.style.padding = '5px';
-		modelContainer.style.backgroundColor = '#333';
+		modelContainer.style.backgroundColor = '#1e392a';
 		modelContainer.style.margin = '10px';
 		modelContainer.style.borderRadius = '5px';
-		modelContainer.style.border = '1px solid #ff5722';
+		modelContainer.style.border = '1px solid #38a169';
 		container.appendChild(modelContainer);
 
 		// Add status text
 		const statusText = document.createElement('span');
-		statusText.textContent = 'UI RENDERED SUCCESSFULLY';
+		statusText.textContent = 'ACTIVE';
 		statusText.style.color = '#4CAF50';
 		statusText.style.fontWeight = 'bold';
 		modelContainer.appendChild(statusText);
 
-		// Create model selector
+		// Create model selector with dark green styling
 		const modelSelectorContainer = document.createElement('div');
 		modelSelectorContainer.style.display = 'flex';
 		modelSelectorContainer.style.alignItems = 'center';
+		modelSelectorContainer.style.backgroundColor = '#1e392a'; // Dark green background
+		modelSelectorContainer.style.padding = '5px 10px';
+		modelSelectorContainer.style.borderRadius = '3px';
+		modelSelectorContainer.style.border = '1px solid #38a169'; // Green border
 		modelContainer.appendChild(modelSelectorContainer);
 
 		// Add label for model selector
@@ -277,26 +281,28 @@ export class BlazeViewPane extends ViewPane {
 		modelLabel.style.marginRight = '5px';
 		modelSelectorContainer.appendChild(modelLabel);
 
-		// Create the select element
+		// Create the select element with green styling
 		const modelSelector = document.createElement('select');
 		modelSelector.className = 'blaze-model-selector';
 		modelSelector.style.padding = '5px';
-		modelSelector.style.border = 'none';
+		modelSelector.style.border = '1px solid #38a169'; // Green border
 		modelSelector.style.borderRadius = '3px';
-		modelSelector.style.backgroundColor = '#555';
+		modelSelector.style.backgroundColor = '#2d513d'; // Medium dark green
 		modelSelector.style.color = 'white';
 		modelSelectorContainer.appendChild(modelSelector);
 
 		// Add model options
+		const claudeOption = document.createElement('option');
+		claudeOption.value = 'us.anthropic.claude-3-7-sonnet-20250219-v1:0';
+		claudeOption.textContent = 'Claude 3.7 Sonnet';
+		modelSelector.appendChild(claudeOption);
+
 		const novaOption = document.createElement('option');
 		novaOption.value = 'us.amazon.nova-lite-v1:0';
 		novaOption.textContent = 'Nova Lite';
 		modelSelector.appendChild(novaOption);
 
-		const claudeOption = document.createElement('option');
-		claudeOption.value = 'us.anthropic.claude-3-7-sonnet-20250219-v1:0';
-		claudeOption.textContent = 'Claude 3.7 Sonnet';
-		modelSelector.appendChild(claudeOption);
+
 
 		// Log that we've created the UI
 		this.logService.info('BlazeViewPane: Created high visibility UI');

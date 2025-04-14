@@ -37,6 +37,47 @@ interface FileOperation {
 	}[];
 }
 
+type CodeBlock = {
+	language: string | null;
+	code: string;
+};
+
+function extractCodeBlocks(markdown: string): CodeBlock[] {
+	// Log the incoming markdown to see what we're working with
+	console.log('MARKDOWN TO PARSE LENGTH:', markdown.length);
+	console.log('MARKDOWN FIRST 100 CHARS:', markdown.substring(0, 100));
+	console.log('MARKDOWN INCLUDES TRIPLE BACKTICKS:', markdown.includes('```'));
+	console.log('MARKDOWN INCLUDES SINGLE BACKTICKS:', markdown.includes('`'));
+
+	// Try to match both triple and single backtick code blocks
+	const tripleBacktickRegex = /```(\w+)?\s*\n([\s\S]*?)```/g;
+	const singleBacktickRegex = /`(\w+)?\s*\n([\s\S]*?)`/g;
+
+	const blocks: CodeBlock[] = [];
+
+	// First try triple backticks (standard markdown)
+	let match;
+	while ((match = tripleBacktickRegex.exec(markdown)) !== null) {
+		const language = match[1] || null;
+		const code = match[2].trim();
+		console.log('TRIPLE BACKTICK MATCH FOUND - Language:', language);
+		blocks.push({ language, code });
+	}
+
+	// If no triple backtick matches, try single backticks
+	if (blocks.length === 0) {
+		while ((match = singleBacktickRegex.exec(markdown)) !== null) {
+			const language = match[1] || null;
+			const code = match[2].trim();
+			console.log('SINGLE BACKTICK MATCH FOUND - Language:', language);
+			blocks.push({ language, code });
+		}
+	}
+
+	console.log('TOTAL CODE BLOCKS FOUND:', blocks.length);
+	return blocks;
+}
+
 export class BlazeRestChatService extends Disposable {
 	private readonly apiEndpoint = 'https://randdai-dev.unidatum.com/api/rag/bedrock_query';
 	private pendingFileModifications: Map<string, string> = new Map();
@@ -67,7 +108,14 @@ export class BlazeRestChatService extends Disposable {
 			const applyMatch = message.match(applyChangesRegex);
 			if (applyMatch && applyMatch[1]) {
 				const filePath = applyMatch[1];
-				return await this.applyPendingChanges(filePath);
+				// Check if user wants to apply directly to the original file
+				const applyDirectly = message.toLowerCase().includes('directly') ||
+					message.toLowerCase().includes('without diff') ||
+					message.toLowerCase().includes('original file') ||
+					message.toLowerCase().includes('to original');
+
+				this.logService.info(`BlazeRestChatService: Applying changes to ${filePath}, applyDirectly=${applyDirectly}`);
+				return await this.applyPendingChanges(filePath, applyDirectly);
 			}
 
 			// Check if this is a file operation
@@ -528,8 +576,9 @@ By waiting for and carefully considering the user's response after each tool use
 	/**
 	 * Apply pending changes to a file
 	 * @param filePath The path of the file to apply changes to
+	 * @param applyDirectly If true, apply changes directly to the original file without showing diff
 	 */
-	private async applyPendingChanges(filePath: string): Promise<string> {
+	private async applyPendingChanges(filePath: string, applyDirectly: boolean = false): Promise<string> {
 		this.logService.info(`BlazeRestChatService: Applying pending changes to ${filePath}`);
 
 		try {
@@ -567,54 +616,155 @@ By waiting for and carefully considering the user's response after each tool use
 			// Read the current file content (needed for verification)
 			await this.fileService.readFile(fileUri);
 
-			// Create a temporary file for the modified content
-			const tempFileName = `${filePath}.proposed.${Date.now()}`;
-			const tempFileUri = URI.joinPath(fileUri.with({ path: fileUri.path.substring(0, fileUri.path.lastIndexOf('/')) }), tempFileName);
+			// Get the current content of the file for backup purposes
+			const currentContent = (await this.fileService.readFile(fileUri)).value.toString();
 
-			// Write the modified content to the temporary file
+			// If we're applying directly to the original file, skip the diff view
+			if (applyDirectly) {
+				// Write the modified content directly to the original file
+				const buffer = VSBuffer.fromString(newContent);
+				await this.fileService.writeFile(fileUri, buffer);
+
+				// Open the file in the editor
+				await this.commandService.executeCommand('vscode.open', fileUri);
+
+				return `Changes have been applied directly to ${filePath}. The file is now open in the editor.`;
+			}
+
+			// For the diff view, we'll directly edit the original file
+			// First, create a backup of the original file content
+			const backupFileName = `${filePath}.backup.${Date.now()}`;
+			// Get the parent directory URI safely
+			let parentDirUri: URI;
+			const lastSlashIndex = fileUri.path.lastIndexOf('/');
+			if (lastSlashIndex > 0) {
+				// If there's a valid path with slashes, get the parent directory
+				parentDirUri = fileUri.with({ path: fileUri.path.substring(0, lastSlashIndex) });
+			} else {
+				// If there's no slash or it's at position 0, use the fileUri directly as parent
+				parentDirUri = fileUri;
+			}
+			// Create the backup file URI
+			const backupFileUri = URI.joinPath(parentDirUri, backupFileName);
+
+			// Write the original content to the backup file
+			const backupBuffer = VSBuffer.fromString(currentContent);
+			await this.fileService.writeFile(backupFileUri, backupBuffer);
+
+			// Now we'll use the backup file as the left side of the diff
+			// and the original file (which we'll modify) as the right side
+
+			// Write the modified content to the original file
 			const buffer = VSBuffer.fromString(newContent);
-			await this.fileService.writeFile(tempFileUri, buffer);
+			await this.fileService.writeFile(fileUri, buffer);
 
 			// Open the diff editor with inline view for better visualization of changes
 			const diffTitle = `Changes for ${filePath}`;
 
 			// Set up diff editor options for inline view with proper highlighting
+			// Note: Not all options may be supported in all VSCode versions
 			const diffOptions = {
 				preview: false,
 				viewColumn: 1, // Open in the active editor group
-				renderedInInlineMode: true, // Show inline diff view
 				ignoreTrimWhitespace: false, // Show whitespace changes
 				revealFirstChange: true, // Automatically scroll to first change
 				enableLineNumbersToggle: true, // Allow toggling line numbers
 				lineNumbersMinChars: 3 // Ensure enough space for line numbers
 			};
 
-			// Use the diff command with our custom options
+			// Create a custom options object with inline diff visualization settings
+			// Use type assertion to allow additional properties that might be supported in some VSCode versions
+			const extendedOptions: any = {
+				...diffOptions,
+				// Standard options
+				renderSideBySide: false,
+				// Other useful options
+				enableInlineActions: true,
+				originalEditable: true,
+				diffAlgorithm: 'advanced',
+				codeLens: true,
+				isInEmbeddedEditor: false,
+				renderedInInlineMode: true,
+				readonly: false
+			};
+
+			// Add additional properties that might be used in different VSCode versions
+			// Using a separate object to avoid TypeScript errors about duplicate properties
+			const additionalOptions = {
+				'inline': true,
+				'mode': 'inline',
+				'viewMode': 'inline',
+				'editor.renderSideBySide': false,
+				'diffEditor.renderSideBySide': false
+			};
+
+			// Merge the additional options
+			Object.assign(extendedOptions, additionalOptions);
+
+			// Try to set global editor configuration
+			try {
+				// @ts-ignore - This might not be available in all VSCode versions
+				global.diffEditorRenderSideBySide = false;
+			} catch (e) {
+				// Ignore errors
+			}
+
+			// Log the extended options we're trying to use
+			this.logService.info('BlazeRestChatService: Using Git-like diff editor options', extendedOptions);
+
+			// Use the diff command with our extended options
 			const diffCommand = {
 				id: 'vscode.diff',
 				args: [
-					fileUri.toString(), // Original file (left side)
-					tempFileUri.toString(), // Modified file (right side)
+					backupFileUri, // Backup of original content (left side)
+					fileUri, // Original file with new content (right side)
 					diffTitle,
-					diffOptions
+					extendedOptions // Use extended options instead of basic diffOptions
 				]
 			};
 
 			// Execute the command to open the diff editor
-			await this.commandService.executeCommand(diffCommand.id, ...diffCommand.args);
+			try {
+				await this.commandService.executeCommand(diffCommand.id, ...diffCommand.args);
 
-			// Also set the editor configuration for inline diff view
-			await this.commandService.executeCommand('setContext', 'diffEditor.diffAlgorithm', 'advanced');
-			await this.commandService.executeCommand('setContext', 'diffEditor.renderSideBySide', false);
+				// Try to set editor configuration for inline diff view using multiple approaches
+				try {
+					// First try direct editor configuration commands
+					await this.commandService.executeCommand('setContext', 'diffEditor.diffAlgorithm', 'advanced');
+					await this.commandService.executeCommand('setContext', 'diffEditor.renderSideBySide', false);
+					await this.commandService.executeCommand('setContext', 'diffEditor.wordWrap', 'on');
+					await this.commandService.executeCommand('setContext', 'diffEditor.renderIndicators', true);
+					await this.commandService.executeCommand('setContext', 'diffEditor.renderMarginRevertIcon', true);
 
-			// Configure the diff editor to show line numbers and highlight changes properly
-			await this.commandService.executeCommand('setContext', 'diffEditor.wordWrap', 'on');
-			await this.commandService.executeCommand('setContext', 'diffEditor.renderIndicators', true);
-			await this.commandService.executeCommand('setContext', 'diffEditor.renderMarginRevertIcon', true);
-			await this.commandService.executeCommand('setContext', 'diffEditor.maxComputationTime', 5000);
+					// Also try the editor.action.toggleInlineView command which should work in newer VSCode versions
+					await this.commandService.executeCommand('editor.action.toggleInlineView');
+
+					// Try the workbench.action.compareEditor.toggleInlineView command which might work in some versions
+					await this.commandService.executeCommand('workbench.action.compareEditor.toggleInlineView');
+
+					// Try setting the user setting directly as a last resort
+					await this.commandService.executeCommand('workbench.action.openSettings', 'diffEditor.renderSideBySide');
+
+					this.logService.info('BlazeRestChatService: Attempted multiple approaches to enable inline view');
+				} catch (configError) {
+					// Ignore errors from setting editor configuration
+					this.logService.warn('BlazeRestChatService: Could not set diff editor configuration, continuing anyway', configError);
+				}
+			} catch (diffError) {
+				// If the diff command fails, we'll just open the modified file directly
+				this.logService.warn('BlazeRestChatService: Could not open diff view, opening modified file directly', diffError);
+				// Use the editorService directly to open the file
+				try {
+					// Open the original file which already has the changes
+					await this.commandService.executeCommand('vscode.open', fileUri);
+				} catch (openError) {
+					this.logService.warn('BlazeRestChatService: Could not open modified file with vscode.open command', openError);
+					return `Applied changes directly to ${filePath} but could not open the file in the editor. You may need to open it manually.`;
+				}
+			}
 
 			// Return a message with instructions
-			return `I've opened a diff editor showing the proposed changes to ${filePath} in inline view.\n\nThe changes are displayed directly in the file with:\n- Red highlighting for removed lines (with original line numbers)\n- Green highlighting for added lines (with blank line numbers)\n- Blue highlighting for modified parts within lines\n\nTo apply these changes, you can either:\n1. Edit the file directly based on what you see in the diff\n2. Use VSCode's inline diff editor controls to accept/reject specific changes\n3. Use the "Accept All Changes" button in the editor toolbar to apply everything\n\nOnce you're done, you can close the diff editor.`;
+			return `I've opened a diff editor showing the proposed changes to ${filePath}.\n\n**Note:** If the diff editor opens in side-by-side view, you can switch to inline view by clicking the (three dots) in the top right corner and selecting "Inline View".\n\n**The changes are displayed with:**\n- Red highlighting for removed content\n- Green highlighting for added content\n- Changes are shown in the context of the file\n\n**How to work with changes:**\n\n1. **Navigate between changes:**\n   - Use the arrow buttons in the toolbar to jump between changes\n   - Look for the change indicators in the gutter (colored bars)\n\n2. **Review the changes:**\n   - The changes are already applied to the original file\n   - The diff view shows you what was changed\n   - The backup file (left side) contains the original content\n\n3. **Modify if needed:**\n   - You can make additional edits directly in the file\n   - The changes are already saved to the original file\n\n4. **Revert if needed:**\n   - If you don't like the changes, you can copy content from the backup\n   - Or respond with: "Revert changes to ${filePath}"\n\n5. **Finish reviewing:**\n   - When you're done, simply close the diff editor\n   - The changes are already applied to the original file\n\nThe original file has already been modified with these changes.`;
 		} catch (error) {
 			this.logService.error('BlazeRestChatService: Error applying changes to file', error);
 			return `Error: Could not apply changes to '${filePath}'. ${error.message}`;
@@ -842,8 +992,12 @@ I need to ${originalMessage}. Please provide the complete modified code.`,
 				console.log('REQUEST TIME:', new Date().toISOString());
 
 				// Log the first part of the file content in the payload
-				if (payload.prompt.includes('CURRENT CONTENT:')) {
-					const contentStart = payload.prompt.indexOf('CURRENT CONTENT:');
+				// Use a more flexible check that doesn't depend on the specific apostrophe character
+				if (payload.prompt.includes('Here') && payload.prompt.includes('the current code:')) {
+					// Find the approximate position by looking for parts of the phrase
+					const herePosition = payload.prompt.indexOf('Here');
+					const codePosition = payload.prompt.indexOf('the current code:', herePosition);
+					const contentStart = codePosition > 0 ? codePosition : herePosition;
 					const codeBlockStart = payload.prompt.indexOf('```', contentStart);
 					const codeBlockEnd = payload.prompt.indexOf('```', codeBlockStart + 3);
 					if (codeBlockStart > 0 && codeBlockEnd > 0) {
@@ -856,7 +1010,7 @@ I need to ${originalMessage}. Please provide the complete modified code.`,
 						console.log('PROMPT PREVIEW:', payload.prompt.substring(0, 200));
 					}
 				} else {
-					console.log('CURRENT CONTENT NOT FOUND IN PROMPT');
+					console.log('CODE INTRODUCTION PHRASE NOT FOUND OR MALFORMED');
 					console.log('PROMPT PREVIEW:', payload.prompt.substring(0, 200));
 				}
 
@@ -877,28 +1031,43 @@ I need to ${originalMessage}. Please provide the complete modified code.`,
 				// Parse the response
 				const data: BlazeRestResponse = await response.json();
 
-				// Extract code blocks from the response
-				const codeBlockRegex = /``(?:[\w]*)?(([\s\S]*?))``/g;
-				let match;
+				this.logService.info('=== RAW RESPONSE BEFORE EXTRACTION ===');
+				this.logService.info('RESPONSE PREVIEW:', data.response.substring(0, 500));
+				this.logService.info('HAS TRIPLE BACKTICKS:', data.response.includes('```'));
+				this.logService.info('HAS BACKTICK PYTHON:', data.response.includes('`python'));
+
 				let extractedCode = '';
-
-				while ((match = codeBlockRegex.exec(data.response)) !== null) {
-					if (match[1]) {
-						extractedCode = match[1].trim();
-						break; // Use the first code block
+				const blocks = extractCodeBlocks(data.response);
+				this.logService.info('=========== CODE BLOCKS EXTRACTED ===========');
+				this.logService.info(`Found ${blocks.length} code blocks in response`);
+				blocks.forEach((block, i) => {
+					this.logService.info(`\n--- Code Block #${i + 1} ---`);
+					this.logService.info(`Language: ${block.language ?? 'None'}`);
+					this.logService.info(`Code length: ${block.code.length} chars`);
+					this.logService.info(`Code preview: ${block.code.substring(0, 50)}...`);
+					this.logService.info(`BlazeRestChatService: Found code block #${i + 1}, language: ${block.language ?? 'None'}, length: ${block.code.length} chars`);
+					if (block.code) {
+						extractedCode = block.code;
 					}
-				}
+				});
 
-				// Store the extracted code for later application
+
+				// If we have extracted code, automatically apply the changes
 				if (extractedCode) {
-					this.logService.info(`BlazeRestChatService: Storing pending changes for ${operation.filePath}`);
+					this.logService.info(`BlazeRestChatService: Automatically applying changes to ${operation.filePath}`);
+
+					// Store the changes in case we need them later
 					this.pendingFileModifications.set(operation.filePath, extractedCode);
+
+					// Apply the changes with diff view for review
+					const applyResult = await this.applyPendingChanges(operation.filePath, false);
+
+					// Return the AI response along with information about the applied changes
+					return `${data.response}\n\n${applyResult}`;
 				} else {
 					this.logService.warn(`BlazeRestChatService: No code block found in response for ${operation.filePath}`);
+					return `${data.response}\n\nI analyzed the file but couldn't determine what changes to make. Please provide more specific instructions.`;
 				}
-
-				// Add instructions for applying the changes
-				return `${data.response}\n\nTo apply these changes, respond with: "Apply these changes to ${operation.filePath}"`;
 
 			} else if (operation.type === 'edit') {
 				// For direct editing, we'll use a tool to edit the file
@@ -908,17 +1077,20 @@ I need to ${originalMessage}. Please provide the complete modified code.`,
 
 					const editResponse = await this.getResponseFromRestApi(editPrompt, modelId);
 
-					// Extract code blocks from the response
-					const codeBlockRegex = /``(?:[\w]*)?([\s\S]*?)``/g;
-					let match;
 					let extractedCode = '';
-
-					while ((match = codeBlockRegex.exec(editResponse)) !== null) {
-						if (match[1]) {
-							extractedCode = match[1].trim();
-							break; // Use the first code block
+					const blocks = extractCodeBlocks(editResponse);
+					console.log('=========== CODE BLOCKS EXTRACTED (EDIT) ===========');
+					console.log(`Found ${blocks.length} code blocks in edit response`);
+					blocks.forEach((block, i) => {
+						console.log(`\n--- Edit Code Block #${i + 1} ---`);
+						console.log(`Language: ${block.language ?? 'None'}`);
+						console.log(`Code length: ${block.code.length} chars`);
+						console.log(`Code preview: ${block.code.substring(0, 50)}...`);
+						this.logService.info(`BlazeRestChatService: Found edit code block #${i + 1}, language: ${block.language ?? 'None'}, length: ${block.code.length} chars`);
+						if (block.code) {
+							extractedCode = block.code;
 						}
-					}
+					});
 
 					if (extractedCode) {
 						// Write the modified content to the file
@@ -970,16 +1142,29 @@ I need to ${originalMessage}. Please provide the complete modified code.`,
 				const data: BlazeRestResponse = await response.json();
 
 				// Extract code blocks from the response
-				const codeBlockRegex = /``(?:[\w]*)?(([\s\S]*?))``/g;
-				let match;
-				let extractedCode = '';
+				//const codeBlockRegex = /``(?:[\w]*)?(([\s\S]*?))``/g;
+				//const codeBlockRegex = /``(?:([a-zA-Z0-9]+)\n)?(([\s\S]*?))``/g;
+				// Extract code blocks from the response
 
-				while ((match = codeBlockRegex.exec(data.response)) !== null) {
-					if (match[1]) {
-						extractedCode = match[1].trim();
-						break; // Use the first code block
+				this.logService.info('=== RAW RESPONSE BEFORE EXTRACTION ===');
+				this.logService.info('RESPONSE PREVIEW:', data.response.substring(0, 500));
+				this.logService.info('HAS TRIPLE BACKTICKS:', data.response.includes('```'));
+				this.logService.info('HAS BACKTICK PYTHON:', data.response.includes('`python'));
+
+				let extractedCode = '';
+				const blocks = extractCodeBlocks(data.response);
+				this.logService.info('=========== CODE BLOCKS EXTRACTED ===========');
+				this.logService.info(`Found ${blocks.length} code blocks in response`);
+				blocks.forEach((block, i) => {
+					this.logService.info(`\n--- Code Block #${i + 1} ---`);
+					this.logService.info(`Language: ${block.language ?? 'None'}`);
+					this.logService.info(`Code length: ${block.code.length} chars`);
+					this.logService.info(`Code preview: ${block.code.substring(0, 50)}...`);
+					this.logService.info(`BlazeRestChatService: Found code block #${i + 1}, language: ${block.language ?? 'None'}, length: ${block.code.length} chars`);
+					if (block.code) {
+						extractedCode = block.code;
 					}
-				}
+				});
 
 				// Store the extracted code for later application
 				if (extractedCode) {
@@ -987,7 +1172,7 @@ I need to ${originalMessage}. Please provide the complete modified code.`,
 				}
 
 				// Add instructions for applying the changes
-				return `${data.response}\n\nTo apply these changes, respond with: "Apply these changes to ${operation.filePath}"`;
+				return `${data.response}\n\nTo apply these changes, you can:\n\n1. Respond with: "Apply these changes to ${operation.filePath}" - This will open a diff editor where you can review and selectively accept changes\n\n2. Respond with: "Apply these changes directly to ${operation.filePath}" - This will apply all changes directly to the original file without showing a diff`;
 			}
 
 			return 'Unsupported file operation.';
