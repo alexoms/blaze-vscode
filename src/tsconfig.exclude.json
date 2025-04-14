@@ -1,0 +1,6 @@
+{
+	"extends": "./tsconfig.json",
+	"exclude": [
+		"./vs/workbench/contrib/blaze/**"
+	]
+}
