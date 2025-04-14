@@ -10,6 +10,10 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { URI } from '../../../../base/common/uri.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { VSBuffer } from '../../../../base/common/buffer.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { modifyFileCommand } from './blazeCommands.js';
 
 interface BlazeRestResponse {
 	response: string;
@@ -22,20 +26,28 @@ interface BlazeRestResponse {
 }
 
 interface FileOperation {
-	type: 'view' | 'modify';
+	type: 'view' | 'modify' | 'edit';
 	filePath: string;
 	functionName?: string;
 	newContent?: string;
+	replacementChunks?: {
+		targetContent: string;
+		replacementContent: string;
+		allowMultiple?: boolean;
+	}[];
 }
 
 export class BlazeRestChatService extends Disposable {
 	private readonly apiEndpoint = 'https://randdai-dev.unidatum.com/api/rag/bedrock_query';
+	private pendingFileModifications: Map<string, string> = new Map();
 
 	constructor(
 		@IChatService private readonly chatService: IChatService,
 		@ILogService private readonly logService: ILogService,
 		@IFileService private readonly fileService: IFileService,
-		@IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService
+		@IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService,
+		@ICommandService private readonly commandService: ICommandService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService
 	) {
 		super();
 	}
@@ -50,9 +62,18 @@ export class BlazeRestChatService extends Disposable {
 			this.logService.info('BlazeRestChatService: getResponseFromRestApi called with:', message);
 
 			// Check if this is a file-related query
+			// Check if this is a request to apply changes
+			const applyChangesRegex = /apply\s+(?:these|the)\s+changes\s+to\s+["']?([\w\/\.\-_]+\.[\w]+)["']?/i;
+			const applyMatch = message.match(applyChangesRegex);
+			if (applyMatch && applyMatch[1]) {
+				const filePath = applyMatch[1];
+				return await this.applyPendingChanges(filePath);
+			}
+
+			// Check if this is a file operation
 			const fileOperation = this.parseFileOperation(message);
 			if (fileOperation) {
-				return await this.handleFileOperation(fileOperation, message);
+				return await this.handleFileOperation(fileOperation, message, modelId);
 			}
 
 			// Prepare the payload for the REST API
@@ -104,25 +125,25 @@ After you have made all the required code changes, provide the USER with the fol
 2. *Briefly* summarize the changes that you have made to the entire codebase, focusing on how they solve the USER's task.
 3. If relevant, proactively run terminal commands to execute the USER's code for them instead of telling them what to do. There is no need to ask for permission.
 Here is an example output to the USER:
-	<example>
-	# You are helping the USER create a python-based photo storage app. You have created a routes.py and main.js file, and updated the index.html file:
+<example>
+# You are helping the USER create a python-based photo storage app. You have created a routes.py and main.js file, and updated the index.html file:
 
-	# Step 1. Create routes.py
-	I have created routes.py to define URL endpoints for the "/upload" and "/query" endpoints. In addition, I have added "/" as an endpoint for index.html.
+# Step 1. Create routes.py
+I have created routes.py to define URL endpoints for the "/upload" and "/query" endpoints. In addition, I have added "/" as an endpoint for index.html.
 
-	# Step 2. Create main.js
-	I have created a dedicated main.js file to store all of the interactive front-end code. It defines the UI elements for the display window and buttons, and creates event listeners for those buttons.
+# Step 2. Create main.js
+I have created a dedicated main.js file to store all of the interactive front-end code. It defines the UI elements for the display window and buttons, and creates event listeners for those buttons.
 
-	# Step 3. Update index.html
-	I have moved all the javascript code into main.js, and have imported main.js in index.html. Separating the javascript from the HTML improves code organization and promotes code
-	readability, maintainability, and reusability.
+# Step 3. Update index.html
+I have moved all the javascript code into main.js, and have imported main.js in index.html. Separating the javascript from the HTML improves code organization and promotes code
+readability, maintainability, and reusability.
 
-	# Summary of Changes
-	I have made our photo app interactive by creating a routes.py and main.js. Users can now use our app to Upload and Search for photos
-	using a natural language query. In addition, I have made some modifications to the codebase to improve code organization and readability.
+# Summary of Changes
+I have made our photo app interactive by creating a routes.py and main.js. Users can now use our app to Upload and Search for photos
+using a natural language query. In addition, I have made some modifications to the codebase to improve code organization and readability.
 
-	Run the app and try uploading and searching for photos. If you encounter any errors or want to add new features, please let me know!
-	</example>
+Run the app and try uploading and searching for photos. If you encounter any errors or want to add new features, please let me know!
+</example>
 
 </making_code_changes>
 <debugging>
@@ -215,6 +236,17 @@ By waiting for and carefully considering the user's response after each tool use
 
 			// Parse the response
 			const data: BlazeRestResponse = await response.json();
+			this.logService.info(`BlazeRestChatService: Response received, length: ${data.response.length} characters`);
+
+			// Print full response for debugging
+			console.log('========== REST RESPONSE DETAILS ==========');
+			console.log(`Response Length: ${data.response.length} characters`);
+			console.log(`Model Used: ${data.model}`);
+			console.log(`Tokens Used: ${data.total_tokens} (${data.prompt_tokens} prompt, ${data.completion_tokens} completion)`);
+			console.log(`Processing Time: ${data.processing_time_ms}ms`);
+			console.log(`Request ID: ${data.request_id}`);
+			console.log(`Full Response: ${data.response}`);
+
 
 			// Format the response with additional metadata
 			const formattedResponse = this.formatResponse(data);
@@ -445,7 +477,8 @@ By waiting for and carefully considering the user's response after each tool use
 
 		// Regular expressions to detect file operations
 		const viewFileRegex = /(?:show|view|open|display|get)\s+(?:the\s+)?(?:file|contents\s+of)\s+["']?([\w\/.\-_]+\.[\w]+)["']?/i;
-		const modifyFileRegex = /(?:modify|change|update|edit)\s+(?:the\s+)?(?:file|function\s+in)\s+["']?([\w\/.\-_]+\.[\w]+)["']?/i;
+		// Enhanced regex for modify operations to better match common patterns
+		const modifyFileRegex = /(?:modify|change|update|edit)\s+(?:the\s+)?(?:file|code|function(?:\s+in)?)?\s*["']?([\w\/.\-_]+\.[\w]+)["']?/i;
 
 		// Check for view file request
 		const viewMatch = message.match(viewFileRegex);
@@ -460,14 +493,132 @@ By waiting for and carefully considering the user's response after each tool use
 		// Check for modify file request
 		const modifyMatch = message.match(modifyFileRegex);
 		if (modifyMatch && modifyMatch[1]) {
-			return {
+			const operation: FileOperation = {
 				type: 'modify',
 				filePath: modifyMatch[1],
+				functionName: this.extractFunctionName(message)
+			};
+
+			// Log the operation for debugging
+			this.logService.info(`BlazeRestChatService: Detected file operation: ${operation.type} for ${operation.filePath}${operation.functionName ? `, function: ${operation.functionName}` : ''}`);
+			console.log(`========== FILE OPERATION DETECTED ==========`);
+			console.log(`Type: ${operation.type}`);
+			console.log(`File Path: ${operation.filePath}`);
+			if (operation.functionName) {
+				console.log(`Function Name: ${operation.functionName}`);
+			}
+
+			return operation;
+		}
+
+		const editFileRegex = /(?:directly\s+edit|replace\s+in|tool\s+edit)\s+(?:the\s+)?(?:file)\s+["']?([\w\/.\-_]+\.[\w]+)["']?/i;
+		// Check for edit file request
+		const editMatch = message.match(editFileRegex);
+		if (editMatch && editMatch[1]) {
+			return {
+				type: 'edit',
+				filePath: editMatch[1],
 				functionName: this.extractFunctionName(message)
 			};
 		}
 
 		return null;
+	}
+
+	/**
+	 * Apply pending changes to a file
+	 * @param filePath The path of the file to apply changes to
+	 */
+	private async applyPendingChanges(filePath: string): Promise<string> {
+		this.logService.info(`BlazeRestChatService: Applying pending changes to ${filePath}`);
+
+		try {
+			// Check if we have pending changes for this file
+			const newContent = this.pendingFileModifications.get(filePath);
+			if (!newContent) {
+				return `No pending changes found for ${filePath}. Please request modifications first.`;
+			}
+
+			// Find the file in the workspace
+			const workspaceFolders = this.workspaceService.getWorkspace().folders;
+			if (!workspaceFolders.length) {
+				return 'Error: No workspace folders found. Please open a folder or workspace first.';
+			}
+
+			// Try to find the file in any of the workspace folders
+			let fileUri: URI | undefined;
+			for (const folder of workspaceFolders) {
+				const candidateUri = URI.joinPath(folder.uri, filePath);
+				try {
+					const stat = await this.fileService.stat(candidateUri);
+					if (stat.isFile) {
+						fileUri = candidateUri;
+						break;
+					}
+				} catch (e) {
+					// File not found in this folder, continue to the next one
+				}
+			}
+
+			if (!fileUri) {
+				return `Error: Could not find file '${filePath}' in the workspace.`;
+			}
+
+			// Read the current file content (needed for verification)
+			await this.fileService.readFile(fileUri);
+
+			// Create a temporary file for the modified content
+			const tempFileName = `${filePath}.proposed.${Date.now()}`;
+			const tempFileUri = URI.joinPath(fileUri.with({ path: fileUri.path.substring(0, fileUri.path.lastIndexOf('/')) }), tempFileName);
+
+			// Write the modified content to the temporary file
+			const buffer = VSBuffer.fromString(newContent);
+			await this.fileService.writeFile(tempFileUri, buffer);
+
+			// Open the diff editor with inline view for better visualization of changes
+			const diffTitle = `Changes for ${filePath}`;
+
+			// Set up diff editor options for inline view with proper highlighting
+			const diffOptions = {
+				preview: false,
+				viewColumn: 1, // Open in the active editor group
+				renderedInInlineMode: true, // Show inline diff view
+				ignoreTrimWhitespace: false, // Show whitespace changes
+				revealFirstChange: true, // Automatically scroll to first change
+				enableLineNumbersToggle: true, // Allow toggling line numbers
+				lineNumbersMinChars: 3 // Ensure enough space for line numbers
+			};
+
+			// Use the diff command with our custom options
+			const diffCommand = {
+				id: 'vscode.diff',
+				args: [
+					fileUri.toString(), // Original file (left side)
+					tempFileUri.toString(), // Modified file (right side)
+					diffTitle,
+					diffOptions
+				]
+			};
+
+			// Execute the command to open the diff editor
+			await this.commandService.executeCommand(diffCommand.id, ...diffCommand.args);
+
+			// Also set the editor configuration for inline diff view
+			await this.commandService.executeCommand('setContext', 'diffEditor.diffAlgorithm', 'advanced');
+			await this.commandService.executeCommand('setContext', 'diffEditor.renderSideBySide', false);
+
+			// Configure the diff editor to show line numbers and highlight changes properly
+			await this.commandService.executeCommand('setContext', 'diffEditor.wordWrap', 'on');
+			await this.commandService.executeCommand('setContext', 'diffEditor.renderIndicators', true);
+			await this.commandService.executeCommand('setContext', 'diffEditor.renderMarginRevertIcon', true);
+			await this.commandService.executeCommand('setContext', 'diffEditor.maxComputationTime', 5000);
+
+			// Return a message with instructions
+			return `I've opened a diff editor showing the proposed changes to ${filePath} in inline view.\n\nThe changes are displayed directly in the file with:\n- Red highlighting for removed lines (with original line numbers)\n- Green highlighting for added lines (with blank line numbers)\n- Blue highlighting for modified parts within lines\n\nTo apply these changes, you can either:\n1. Edit the file directly based on what you see in the diff\n2. Use VSCode's inline diff editor controls to accept/reject specific changes\n3. Use the "Accept All Changes" button in the editor toolbar to apply everything\n\nOnce you're done, you can close the diff editor.`;
+		} catch (error) {
+			this.logService.error('BlazeRestChatService: Error applying changes to file', error);
+			return `Error: Could not apply changes to '${filePath}'. ${error.message}`;
+		}
 	}
 
 	/**
@@ -483,8 +634,9 @@ By waiting for and carefully considering the user's response after each tool use
 	 * Handle a file operation request
 	 * @param operation The file operation to perform
 	 * @param originalMessage The original user message
+	 * @param modelId The model ID to use (defaults to Nova Lite)
 	 */
-	private async handleFileOperation(operation: FileOperation, originalMessage: string): Promise<string> {
+	private async handleFileOperation(operation: FileOperation, originalMessage: string, modelId: string = 'us.amazon.nova-lite-v1:0'): Promise<string> {
 		this.logService.info(`BlazeRestChatService: Handling ${operation.type} operation for ${operation.filePath}`);
 
 		try {
@@ -494,28 +646,67 @@ By waiting for and carefully considering the user's response after each tool use
 				return 'Error: No workspace folders found. Please open a folder or workspace first.';
 			}
 
+			// Log workspace folders for debugging
+			this.logService.info(`BlazeRestChatService: Searching for ${operation.filePath} in ${workspaceFolders.length} workspace folders`);
+			workspaceFolders.forEach((folder, index) => {
+				this.logService.info(`BlazeRestChatService: Workspace folder ${index + 1}: ${folder.uri.toString()}`);
+			});
+
 			// Try to find the file in any of the workspace folders
 			let fileUri: URI | undefined;
+
+			// First, try exact path match
 			for (const folder of workspaceFolders) {
 				const candidateUri = URI.joinPath(folder.uri, operation.filePath);
+				this.logService.info(`BlazeRestChatService: Checking for file at ${candidateUri.toString()}`);
 				try {
 					const stat = await this.fileService.stat(candidateUri);
 					if (stat.isFile) {
 						fileUri = candidateUri;
+						this.logService.info(`BlazeRestChatService: Found file at ${candidateUri.toString()}`);
 						break;
 					}
 				} catch (e) {
 					// File not found in this folder, continue to the next one
+					this.logService.info(`BlazeRestChatService: File not found at ${candidateUri.toString()}`);
+				}
+			}
+
+			// If file not found with exact path, try to search for it by name
+			if (!fileUri) {
+				this.logService.info(`BlazeRestChatService: File not found with exact path, trying to search by name: ${operation.filePath}`);
+				const fileName = operation.filePath.split('/').pop() || operation.filePath;
+
+				for (const folder of workspaceFolders) {
+					try {
+						// Try to find the file by name in the root of the workspace
+						const candidateUri = URI.joinPath(folder.uri, fileName);
+						this.logService.info(`BlazeRestChatService: Checking for file by name at ${candidateUri.toString()}`);
+
+						const stat = await this.fileService.stat(candidateUri);
+						if (stat.isFile) {
+							fileUri = candidateUri;
+							this.logService.info(`BlazeRestChatService: Found file by name at ${candidateUri.toString()}`);
+							break;
+						}
+					} catch (e) {
+						// File not found, continue to the next folder
+					}
 				}
 			}
 
 			if (!fileUri) {
-				return `Error: Could not find file '${operation.filePath}' in the workspace.`;
+				this.logService.error(`BlazeRestChatService: Could not find file '${operation.filePath}' in the workspace after searching all folders`);
+				return `Error: Could not find file '${operation.filePath}' in the workspace. Please make sure the file exists and try again. You can use the exact path relative to the workspace root, or just the filename if it's unique.`;
 			}
 
 			// Read the file content
 			const fileContent = await this.fileService.readFile(fileUri);
 			const content = fileContent.value.toString();
+			this.logService.info(`BlazeRestChatService: Successfully read file content, ${content.length} characters`);
+			// Log a preview of the content for debugging
+			const contentPreview = content.length > 100 ? content.substring(0, 100) + '...' : content;
+			this.logService.info(`BlazeRestChatService: Content preview: ${contentPreview}`);
 
 			if (operation.type === 'view') {
 				// If a function name is specified, try to extract just that function
@@ -531,21 +722,234 @@ By waiting for and carefully considering the user's response after each tool use
 				// Return the full file content
 				return `File: ${operation.filePath}\n\n\`\`\`\n${content}\n\`\`\`\n\nWhat would you like to do with this file?`;
 			} else if (operation.type === 'modify') {
+				// Check if the request is for a specific line modification
+				const lineNumberMatch = originalMessage.match(/(?:line|on line)\s+(\d+)/i);
+				// Check for print statement request
+				const addPrintMatch = originalMessage.match(/(?:add|insert)\s+(?:a\s+)?print\s+(?:statement|line)/i);
+
+				// If this is a request to add a print statement for a variable on a specific line
+				if (lineNumberMatch && addPrintMatch && operation.filePath.endsWith('.py')) {
+					const lineNumber = parseInt(lineNumberMatch[1], 10);
+					this.logService.info(`BlazeRestChatService: Detected request to add print statement for variable on line ${lineNumber}`);
+
+					// Use our generic file modification system
+					return this.instantiationService.invokeFunction(accessor => {
+						return modifyFileCommand(accessor, {
+							filePath: operation.filePath,
+							description: `Added print statement for variable on line ${lineNumber}`,
+							modification: (fileContent: string) => {
+								// Split the content into lines
+								const lines = fileContent.split('\n');
+
+								// Check if we have enough lines
+								if (lines.length < lineNumber) {
+									throw new Error(`File does not have enough lines. It should have at least ${lineNumber} lines.`);
+								}
+
+								// Get the target line (0-indexed array)
+								const targetLine = lines[lineNumber - 1];
+
+								// Extract variable name using regex
+								const varMatch = targetLine.match(/(\w+)\s*=/);
+								if (!varMatch || !varMatch[1]) {
+									throw new Error(`Could not find a variable definition in line ${lineNumber}.`);
+								}
+
+								const varName = varMatch[1];
+
+								// Add print statement after the target line
+								lines.splice(lineNumber, 0, `print(f"The value of ${varName} is: {${varName}}")`);
+
+								// Create the modified content
+								return lines.join('\n');
+							}
+						});
+					});
+				}
+
+				// For other modification requests, we need to send the content to the AI for suggestions
+				// Create a more structured system prompt that clearly separates the file content
+				let fileExtension = operation.filePath.split('.').pop() || 'txt';
+				if (fileExtension === 'py') { fileExtension = 'python'; }
+				if (fileExtension === 'js') { fileExtension = 'javascript'; }
+				if (fileExtension === 'ts') { fileExtension = 'typescript'; }
+
+				// Log file content for debugging
+				console.log(`========== FILE CONTENT ==========`);
+				console.log(`File: ${operation.filePath}`);
+				console.log(`Content Length: ${content.length} characters`);
+				console.log(`Content Preview: ${content.substring(0, 100)}...`);
+
+				// Create a much simpler system prompt
+				const modifyPrompt = `You are an AI assistant that helps with code modification. Be direct and specific.`;
+
+				// Add more detailed logging for debugging
+				this.logService.info(`BlazeRestChatService: Preparing modify request for ${operation.filePath}`);
+				this.logService.info(`BlazeRestChatService: File content length: ${content.length} characters`);
+				this.logService.info(`BlazeRestChatService: System prompt length: ${modifyPrompt.length} characters`);
+
+				// Create the payload
+				// Create a simplified user prompt and put more emphasis on the system prompt
+				// Create a very direct payload with explicit file content
+				const payload = {
+					prompt: `I have a file named ${operation.filePath} with the following content:
+
+${content}
+
+I need to ${originalMessage}. Please provide the complete modified code.`,
+					model_id: modelId,
+					system_prompt: modifyPrompt,
+					max_tokens: 2048,
+					temperature: 0.5,
+					top_p: 0.95,
+					top_k: 40
+				};
+
+				// Log detailed payload for debugging
+				const payloadString = JSON.stringify(payload);
+				this.logService.info(`BlazeRestChatService: Payload size: ${payloadString.length} bytes`);
+				this.logService.info(`BlazeRestChatService: First 100 chars of system_prompt: ${payload.system_prompt.substring(0, 100)}...`);
+
+				// Log the complete payload for debugging
+				console.log('========== COMPLETE PAYLOAD SENT TO API ==========');
+				console.log('MODEL ID:', payload.model_id);
+				console.log('USER PROMPT:', payload.prompt);
+				console.log('SYSTEM PROMPT:', payload.system_prompt);
+				console.log('PARAMETERS:', {
+					max_tokens: payload.max_tokens,
+					temperature: payload.temperature,
+					top_p: payload.top_p,
+					top_k: payload.top_k
+				});
+				console.log('FILE CONTENT LENGTH:', content.length, 'characters');
+				console.log('FILE CONTENT PREVIEW:', content.substring(0, 200) + '...');
+
+				// Print full REST call details for debugging
+				console.log('========== REST CALL DETAILS ==========');
+				console.log(`API Endpoint: ${this.apiEndpoint}`);
+				console.log(`Model ID: ${modelId}`);
+				console.log(`User Prompt: ${payload.prompt}`);
+				console.log(`System Prompt: ${payload.system_prompt}`);
+				console.log(`File Content Length: ${content.length} characters`);
+				console.log(`Full Payload Size: ${payloadString.length} bytes`);
+
+				// Create a separate variable for the payload body to better debug it
+				const payloadBody = JSON.stringify(payload);
+				console.log('PAYLOAD BODY LENGTH:', payloadBody.length, 'bytes');
+
+				// Log the API endpoint and timestamp
+				console.log('API ENDPOINT:', this.apiEndpoint);
+				console.log('REQUEST TIME:', new Date().toISOString());
+
+				// Log the first part of the file content in the payload
+				if (payload.prompt.includes('CURRENT CONTENT:')) {
+					const contentStart = payload.prompt.indexOf('CURRENT CONTENT:');
+					const codeBlockStart = payload.prompt.indexOf('```', contentStart);
+					const codeBlockEnd = payload.prompt.indexOf('```', codeBlockStart + 3);
+					if (codeBlockStart > 0 && codeBlockEnd > 0) {
+						const contentPreview = payload.prompt.substring(codeBlockStart + 10, Math.min(codeBlockStart + 110, codeBlockEnd));
+						console.log('FILE CONTENT IN PROMPT:', contentPreview + '...');
+						console.log('CODE BLOCK POSITIONS:', { contentStart, codeBlockStart, codeBlockEnd });
+						console.log('FULL CODE BLOCK:', payload.prompt.substring(codeBlockStart, codeBlockEnd + 3));
+					} else {
+						console.log('COULD NOT FIND CODE BLOCK IN PROMPT');
+						console.log('PROMPT PREVIEW:', payload.prompt.substring(0, 200));
+					}
+				} else {
+					console.log('CURRENT CONTENT NOT FOUND IN PROMPT');
+					console.log('PROMPT PREVIEW:', payload.prompt.substring(0, 200));
+				}
+
+				// Send the request to the REST API
+				this.logService.info('BlazeRestChatService: Sending file modification request to REST API');
+				const response = await fetch(this.apiEndpoint, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json'
+					},
+					body: payloadBody
+				});
+
+				if (!response.ok) {
+					throw new Error(`REST API request failed with status ${response.status}`);
+				}
+
+				// Parse the response
+				const data: BlazeRestResponse = await response.json();
+
+				// Extract code blocks from the response
+				const codeBlockRegex = /``(?:[\w]*)?(([\s\S]*?))``/g;
+				let match;
+				let extractedCode = '';
+
+				while ((match = codeBlockRegex.exec(data.response)) !== null) {
+					if (match[1]) {
+						extractedCode = match[1].trim();
+						break; // Use the first code block
+					}
+				}
+
+				// Store the extracted code for later application
+				if (extractedCode) {
+					this.logService.info(`BlazeRestChatService: Storing pending changes for ${operation.filePath}`);
+					this.pendingFileModifications.set(operation.filePath, extractedCode);
+				} else {
+					this.logService.warn(`BlazeRestChatService: No code block found in response for ${operation.filePath}`);
+				}
+
+				// Add instructions for applying the changes
+				return `${data.response}\n\nTo apply these changes, respond with: "Apply these changes to ${operation.filePath}"`;
+
+			} else if (operation.type === 'edit') {
+				// For direct editing, we'll use a tool to edit the file
+				try {
+					// Prepare the edit operation
+					const editPrompt = `I need to edit the file ${operation.filePath}. Here's the current content:\n\n\`\`\`\n${content}\n\`\`\`\n\nPlease analyze this code and ${originalMessage}`;
+
+					const editResponse = await this.getResponseFromRestApi(editPrompt, modelId);
+
+					// Extract code blocks from the response
+					const codeBlockRegex = /``(?:[\w]*)?([\s\S]*?)``/g;
+					let match;
+					let extractedCode = '';
+
+					while ((match = codeBlockRegex.exec(editResponse)) !== null) {
+						if (match[1]) {
+							extractedCode = match[1].trim();
+							break; // Use the first code block
+						}
+					}
+
+					if (extractedCode) {
+						// Write the modified content to the file
+						const buffer = VSBuffer.fromString(extractedCode);
+						await this.fileService.writeFile(fileUri, buffer);
+						return `I've edited the file ${operation.filePath} with the requested changes.\n\nHere's the updated content:\n\n\`\`\`\n${extractedCode}\n\`\`\`\n\nThe file has been saved successfully.`;
+					} else {
+						return `I analyzed the file ${operation.filePath}, but couldn't determine what changes to make. Here's my analysis:\n\n${editResponse}`;
+					}
+				} catch (error) {
+					this.logService.error('BlazeRestChatService: Error editing file', error);
+					return `Error: Could not edit file '${operation.filePath}'. ${error.message}`;
+				}
+
+
+			} else if (operation.type === 'modify') {
 				// For modification, we need to send the content to the AI for suggestions
-				const systemPrompt = `You are a helpful AI assistant that specializes in code modification.
-				The user wants to modify the following file: ${operation.filePath}
-				${operation.functionName ? `Specifically, they want to modify the function: ${operation.functionName}` : ''}
-				Analyze the code and suggest specific changes based on the user's request.
-				Format your response with the modified code in a code block.`;
+				const modifyPrompt = `You are a helpful AI assistant that specializes in code modification.
+	The user wants to modify the following file: ${operation.filePath}
+	${operation.functionName ? `Specifically, they want to modify the function: ${operation.functionName}` : ''}
+	Analyze the code and suggest specific changes based on the user's request.
+	Format your response with the modified code in a code block.`;
 
 				const payload = {
 					prompt: `${originalMessage}\n\nHere's the current code:\n\`\`\`\n${content}\n\`\`\``,
-					model_id: 'us.amazon.nova-lite-v1:0',
+					model_id: modelId,
+					system_prompt: modifyPrompt,
 					max_tokens: 1024,
 					temperature: 0.7,
 					top_p: 0.9,
-					top_k: 20,
-					system_prompt: systemPrompt
+					top_k: 20
 				};
 
 				// Send the request to the REST API
@@ -565,6 +969,23 @@ By waiting for and carefully considering the user's response after each tool use
 				// Parse the response
 				const data: BlazeRestResponse = await response.json();
 
+				// Extract code blocks from the response
+				const codeBlockRegex = /``(?:[\w]*)?(([\s\S]*?))``/g;
+				let match;
+				let extractedCode = '';
+
+				while ((match = codeBlockRegex.exec(data.response)) !== null) {
+					if (match[1]) {
+						extractedCode = match[1].trim();
+						break; // Use the first code block
+					}
+				}
+
+				// Store the extracted code for later application
+				if (extractedCode) {
+					this.pendingFileModifications.set(operation.filePath, extractedCode);
+				}
+
 				// Add instructions for applying the changes
 				return `${data.response}\n\nTo apply these changes, respond with: "Apply these changes to ${operation.filePath}"`;
 			}
@@ -575,6 +996,8 @@ By waiting for and carefully considering the user's response after each tool use
 			return `Error handling file operation: ${error.message}`;
 		}
 	}
+
+
 
 	/**
 	 * Extract a function's content from a file
